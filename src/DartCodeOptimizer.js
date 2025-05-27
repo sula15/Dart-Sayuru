@@ -1,16 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { Download, Send, Trash2, Code, BarChart3, FileText, Zap, CheckCircle } from 'lucide-react';
+import { Download, Send, Trash2, Code, BarChart3, FileText, Zap, CheckCircle, Blocks } from 'lucide-react';
+import BlocklyWorkspace from './BlocklyWorkspace';
 
 const DartCodeOptimizer = () => {
-  const [apiKey, setApiKey] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('comparison');
   const [currentResult, setCurrentResult] = useState(null);
+  const [blocksXml, setBlocksXml] = useState('');
   const chatEndRef = useRef(null);
 
+  // Get API key from environment variable
+  const apiKey = process.env.REACT_APP_GEMINI_API_KEY;
   const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 
   useEffect(() => {
@@ -68,12 +71,13 @@ const DartCodeOptimizer = () => {
   };
 
   const optimizeDartCode = async (code, userMessage) => {
-    if (!genAI) throw new Error('API key not configured');
+    if (!genAI) {
+      throw new Error('API key not configured. Please check your .env file.');
+    }
 
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
 
-    const prompt = `
-You are an expert Dart developer. Optimize this Dart code and provide detailed analysis.
+    const prompt = `You are an expert Dart developer. Optimize this Dart code and provide detailed analysis.
 
 USER REQUEST: ${userMessage || "Optimize this code"}
 
@@ -82,56 +86,139 @@ DART CODE:
 ${code}
 \`\`\`
 
-Provide comprehensive optimization including:
-1. Optimized code with comments
-2. Specific improvements made
-3. Performance impact analysis
-4. Readability score (1-10)
+Please optimize the code focusing on:
+1. Performance improvements
+2. Null safety compliance
+3. Modern Dart patterns
+4. Code readability
+5. Best practices
 
-Focus on: performance, null safety, modern Dart patterns, readability.
-
-RESPONSE FORMAT (JSON):
+IMPORTANT: You MUST respond with a valid JSON object in this exact format:
 {
-  "optimized_code": "// Complete optimized code here",
-  "improvements": ["improvement 1", "improvement 2"],
-  "performance_impact": "detailed performance analysis",
+  "optimized_code": "// Your complete optimized Dart code here with comments",
+  "improvements": [
+    "Specific improvement 1",
+    "Specific improvement 2",
+    "Specific improvement 3"
+  ],
+  "performance_impact": "Detailed explanation of performance improvements made",
   "readability_score": 8.5
 }
-`;
 
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text().trim();
-
-    // Extract JSON from response
-    const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/) || 
-                     responseText.match(/(\{[\s\S]*\})/);
-    
-    if (!jsonMatch) {
-      return {
-        original_code: code,
-        optimized_code: responseText,
-        improvements: ["Code optimization completed"],
-        performance_impact: "Analysis provided in response",
-        readability_score: 7.0
-      };
-    }
+Make sure the JSON is properly formatted and contains all required fields.`;
 
     try {
-      const resultData = JSON.parse(jsonMatch[1]);
-      return {
+      const apiResponse = await model.generateContent(prompt);
+      const responseText = apiResponse.response.text().trim();
+
+      // Multiple attempts to extract JSON
+      let jsonData = null;
+      let extractedJson = '';
+
+      // Method 1: Look for JSON code blocks
+      const jsonBlockMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonBlockMatch) {
+        extractedJson = jsonBlockMatch[1];
+      } else {
+        // Method 2: Look for any JSON-like structure
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          extractedJson = jsonMatch[0];
+        } else {
+          // Method 3: Try to find JSON between specific markers
+          const startMarkers = ['{', '{\n', '{ \n'];
+          const endMarkers = ['}', '\n}', '\n }'];
+          
+          for (const startMarker of startMarkers) {
+            const startIndex = responseText.indexOf(startMarker);
+            if (startIndex !== -1) {
+              for (const endMarker of endMarkers) {
+                const endIndex = responseText.lastIndexOf(endMarker);
+                if (endIndex > startIndex) {
+                  extractedJson = responseText.substring(startIndex, endIndex + endMarker.length);
+                  break;
+                }
+              }
+              if (extractedJson) break;
+            }
+          }
+        }
+      }
+
+      if (!extractedJson) {
+        // Fallback: Create response from raw text
+        return {
+          original_code: code,
+          optimized_code: responseText.includes('```') 
+            ? responseText.match(/```[\s\S]*?\n([\s\S]*?)```/)?.[1] || responseText
+            : responseText,
+          improvements: ["Code optimization completed", "Check the optimized code for improvements"],
+          performance_impact: "Analysis provided in the response text",
+          readability_score: 7.0
+        };
+      }
+      
+      try {
+        jsonData = JSON.parse(extractedJson);
+      } catch (parseError) {
+        // Try to clean the JSON
+        let cleanedJson = extractedJson
+          .replace(/,\s*}/g, '}')  // Remove trailing commas in objects
+          .replace(/,\s*]/g, ']')  // Remove trailing commas in arrays
+          .replace(/\n/g, ' ')     // Replace newlines with spaces
+          .replace(/\s+/g, ' ')    // Collapse multiple spaces
+          .trim();
+        
+        try {
+          jsonData = JSON.parse(cleanedJson);
+        } catch (secondParseError) {
+          throw new Error('Failed to parse optimization result - invalid JSON format');
+        }
+      }
+
+      // Validate required fields
+      const requiredFields = ['optimized_code', 'improvements', 'performance_impact', 'readability_score'];
+      const missingFields = requiredFields.filter(field => !jsonData.hasOwnProperty(field));
+      
+      if (missingFields.length > 0) {
+        // Fill in missing fields with defaults
+        missingFields.forEach(field => {
+          switch (field) {
+            case 'optimized_code':
+              jsonData.optimized_code = code;
+              break;
+            case 'improvements':
+              jsonData.improvements = ["Code optimization completed"];
+              break;
+            case 'performance_impact':
+              jsonData.performance_impact = "Performance analysis not provided";
+              break;
+            case 'readability_score':
+              jsonData.readability_score = 7.0;
+              break;
+          }
+        });
+      }
+
+      const optimizationResult = {
         original_code: code,
-        optimized_code: resultData.optimized_code || "",
-        improvements: resultData.improvements || [],
-        performance_impact: resultData.performance_impact || "",
-        readability_score: resultData.readability_score || 0
+        optimized_code: jsonData.optimized_code || code,
+        improvements: Array.isArray(jsonData.improvements) ? jsonData.improvements : ["Code optimization completed"],
+        performance_impact: jsonData.performance_impact || "Performance analysis not provided",
+        readability_score: typeof jsonData.readability_score === 'number' ? jsonData.readability_score : 7.0
       };
-    } catch (e) {
-      throw new Error('Failed to parse optimization result');
+      
+      return optimizationResult;
+
+    } catch (error) {
+      throw error;
     }
   };
 
   const handleSendMessage = async () => {
-    if (!inputMessage.trim() || !apiKey) return;
+    if (!inputMessage.trim() || !apiKey) {
+      return;
+    }
 
     const userMessage = {
       role: 'user',
@@ -152,16 +239,26 @@ RESPONSE FORMAT (JSON):
 
         const assistantMessage = {
           role: 'assistant',
-          content: '✅ **Code optimization completed!** Here\'s your enhanced Dart code:',
+          content: '✅ **Code optimization completed!** Here\'s your enhanced Dart code with visual blocks:',
           timestamp: new Date(),
           optimizationResult: result
         };
 
         setChatHistory(prev => [...prev, assistantMessage]);
+        
+        // Switch to blocks tab automatically when optimization is complete
+        setTimeout(() => setActiveTab('blocks'), 1000);
+
       } catch (error) {
         const errorMessage = {
           role: 'assistant',
-          content: `❌ **Error:** ${error.message}`,
+          content: `❌ **Error:** ${error.message}
+
+**Troubleshooting:**
+• Ensure your .env file contains REACT_APP_GEMINI_API_KEY
+• Check your internet connection
+• Try with simpler code first
+• Restart the development server after adding .env variables`,
           timestamp: new Date()
         };
         setChatHistory(prev => [...prev, errorMessage]);
@@ -182,7 +279,12 @@ RESPONSE FORMAT (JSON):
 • 🚀 Performance optimization
 • 📖 Code readability improvements  
 • 🔒 Null safety compliance
-• 🆕 Modern Dart/Flutter patterns`,
+• 🆕 Modern Dart/Flutter patterns
+
+**New Feature:** 🧩 **Visual Blocks View**
+• See your optimized code as connected blocks
+• Drag and drop to modify structure
+• Export blocks for educational use`,
         timestamp: new Date()
       };
       setChatHistory(prev => [...prev, helpMessage]);
@@ -199,30 +301,40 @@ RESPONSE FORMAT (JSON):
     URL.revokeObjectURL(url);
   };
 
+  const handleBlocksChange = (xmlText) => {
+    setBlocksXml(xmlText);
+  };
+
   const loadExample = () => {
-    const exampleCode = `class UserManager {
-  List<User> users = [];
+    const exampleCode = `class userManager {
+  var users;
+  var activeUsers;
   
-  void addUser(String name, String email) {
-    if (name != null && email != null) {
-      users.add(User(name, email));
+  userManager() {
+    users = [];
+    activeUsers = [];
+  }
+  
+  void addUser(name, email, age) {
+    if (name != null && email != null && age != null) {
+      var user = {};
+      user['name'] = name;
+      user['email'] = email;
+      user['age'] = age;
+      user['isActive'] = true;
+      users.add(user);
+      activeUsers.add(user);
     }
   }
   
-  User findUser(String email) {
-    for (var user in users) {
-      if (user.email == email) {
-        return user;
+  findUserByEmail(email) {
+    for (var i = 0; i < users.length; i++) {
+      if (users[i]['email'] == email) {
+        return users[i];
       }
     }
     return null;
   }
-}
-
-class User {
-  String name;
-  String email;
-  User(this.name, this.email);
 }`;
     setInputMessage(exampleCode);
   };
@@ -230,6 +342,7 @@ class User {
   const clearChat = () => {
     setChatHistory([]);
     setCurrentResult(null);
+    setBlocksXml('');
   };
 
   const ComparisonView = ({ result }) => {
@@ -380,13 +493,22 @@ class User {
     </div>
   );
 
+  const BlocksView = ({ result }) => (
+    <div className="h-full">
+      <BlocklyWorkspace 
+        dartCode={result.optimized_code}
+        onBlocksChange={handleBlocksChange}
+      />
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="container mx-auto px-4 py-8">
         {/* Header */}
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-gray-800 mb-2">🎯 Dart Code Optimizer</h1>
-          <p className="text-gray-600">Powered by Gemini 2.0 Flash • AI-Driven Code Enhancement</p>
+          <p className="text-gray-600">Powered by Gemini 2.0 Flash • AI-Driven Code Enhancement with Visual Blocks</p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -396,27 +518,24 @@ class User {
               <h3 className="text-lg font-semibold mb-4">⚙️ Configuration</h3>
               
               {!apiKey ? (
-                <div className="space-y-4">
-                  <div className="bg-red-50 p-4 rounded-lg border border-red-200">
-                    <p className="text-red-800 text-sm font-medium mb-2">🔑 API Key Required</p>
-                    <p className="text-red-600 text-xs">
-                      Get your free API key from{' '}
-                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" 
-                         className="underline">Google AI Studio</a>
-                    </p>
+                <div className="bg-red-50 p-4 rounded-lg border border-red-200">
+                  <p className="text-red-800 text-sm font-medium mb-2">🔑 API Key Missing</p>
+                  <p className="text-red-600 text-xs mb-3">
+                    Please add your Gemini API key to your .env file:
+                  </p>
+                  <div className="bg-gray-800 text-green-400 p-2 rounded text-xs font-mono">
+                    REACT_APP_GEMINI_API_KEY=your_api_key_here
                   </div>
-                  <input
-                    type="password"
-                    placeholder="Enter your Gemini API key"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  />
+                  <p className="text-red-600 text-xs mt-2">
+                    Get your free API key from{' '}
+                    <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" 
+                       className="underline">Google AI Studio</a>
+                  </p>
                 </div>
               ) : (
                 <div className="bg-green-50 p-4 rounded-lg border border-green-200">
-                  <p className="text-green-800 text-sm font-medium">🟢 API Key configured!</p>
-                  <p className="text-green-600 text-xs">...{apiKey.slice(-8)}</p>
+                  <p className="text-green-800 text-sm font-medium">🟢 API Key Loaded!</p>
+                  <p className="text-green-600 text-xs">From .env file: ...{apiKey.slice(-8)}</p>
                 </div>
               )}
             </div>
@@ -436,8 +555,19 @@ class User {
                   className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
                 >
                   <FileText size={16} />
-                  Load Example
+                  Load Bad Code Example
                 </button>
+              </div>
+            </div>
+
+            <div className="bg-white p-6 rounded-lg shadow-sm">
+              <h3 className="text-lg font-semibold mb-4">🧩 Features</h3>
+              <div className="space-y-2 text-sm text-gray-600">
+                <div>• Visual block representation</div>
+                <div>• Drag & drop code building</div>
+                <div>• Connected block structures</div>
+                <div>• Performance optimization</div>
+                <div>• Null safety compliance</div>
               </div>
             </div>
 
@@ -478,7 +608,7 @@ class User {
                     <div className="bg-gray-100 p-4 rounded-lg">
                       <div className="flex items-center gap-2">
                         <Zap className="animate-spin" size={16} />
-                        🔧 Optimizing your Dart code...
+                        🔧 Optimizing your Dart code and generating blocks...
                       </div>
                     </div>
                   </div>
@@ -518,10 +648,10 @@ class User {
             {currentResult && (
               <div className="bg-white rounded-lg shadow-sm">
                 <div className="border-b border-gray-200">
-                  <div className="flex">
+                  <div className="flex overflow-x-auto">
                     <button
                       onClick={() => setActiveTab('comparison')}
-                      className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors ${
+                      className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
                         activeTab === 'comparison'
                           ? 'border-blue-500 text-blue-600'
                           : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -532,18 +662,18 @@ class User {
                     </button>
                     <button
                       onClick={() => setActiveTab('optimized')}
-                      className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors ${
+                      className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
                         activeTab === 'optimized'
                           ? 'border-blue-500 text-blue-600'
                           : 'border-transparent text-gray-500 hover:text-gray-700'
                       }`}
                     >
                       <Code size={16} className="inline mr-2" />
-                      Optimized Code Only
+                      Optimized Code
                     </button>
                     <button
                       onClick={() => setActiveTab('analysis')}
-                      className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors ${
+                      className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
                         activeTab === 'analysis'
                           ? 'border-blue-500 text-blue-600'
                           : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -552,12 +682,24 @@ class User {
                       <FileText size={16} className="inline mr-2" />
                       Analysis
                     </button>
+                    <button
+                      onClick={() => setActiveTab('blocks')}
+                      className={`px-6 py-4 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+                        activeTab === 'blocks'
+                          ? 'border-purple-500 text-purple-600'
+                          : 'border-transparent text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      <Blocks size={16} className="inline mr-2" />
+                      🧩 Visual Blocks
+                    </button>
                   </div>
                 </div>
-                <div className="p-6">
+                <div className="p-6" style={{ minHeight: activeTab === 'blocks' ? '600px' : 'auto' }}>
                   {activeTab === 'comparison' && <ComparisonView result={currentResult} />}
                   {activeTab === 'optimized' && <OptimizedCodeView result={currentResult} />}
                   {activeTab === 'analysis' && <AnalysisView result={currentResult} />}
+                  {activeTab === 'blocks' && <BlocksView result={currentResult} />}
                 </div>
               </div>
             )}
